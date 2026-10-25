@@ -1,0 +1,31 @@
+{
+  "manifest_version": 3,
+  "name": "Google Tasks 優先度レポート タブまとめ",
+  "version": "1.6.0",
+  "description": "優先度レポートのタスクに紐づくページをまとめて開き、タスク名のタブグループにします。",
+  "permissions": [
+    "tabs",
+    "tabGroups",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://script.google.com/*",
+    "https://*.googleusercontent.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.googleusercontent.com/userCodeAppPanel*"
+      ],
+      "all_frames": true,
+      "js": [
+        "inject.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

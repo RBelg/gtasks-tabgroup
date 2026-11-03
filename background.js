@@ -236,7 +236,9 @@ function mayClose(r, ctx) {
 
 /**
  * タブグループの一覧（「タブ片付け」ボタン用）。
- * mine: 同じ印の画面が開いたもの true / 別の印 false / 印なし・記録なし null。own: レポート自身が入っているもの
+ * mine: 同じ印の画面が開いたもの true / 別の印 false / 印なし・記録なし null。own: レポート自身が入っているもの。
+ * 名前の無いグループも返す（id で閉じられるように）。保存済みのグループを開き直したものや、
+ * ほかのツールが作ったものは名前が無いことが多く、名前では指定できないため
  */
 async function listGroups(msg, sender) {
   await touchAcct(msg.acct);
@@ -248,11 +250,10 @@ async function listGroups(msg, sender) {
   const own = ownGroupId(sender);
   const groups = [];
   for (const g of all) {
-    if (!g.title) continue;
     const tabs = await chrome.tabs.query({ groupId: g.id });
     const ra = recAcct(recs[g.id], seen, now);
     groups.push({
-      title: g.title, tabs: tabs.length, own: g.id === own,
+      id: g.id, title: g.title || '', tabs: tabs.length, own: g.id === own,
       mine: !ra || !acct ? null : ra === acct
     });
   }
@@ -323,20 +324,23 @@ async function syncGroups(msg, sender) {
 async function closeGroups(msg, sender) {
   const want = new Set((Array.isArray(msg.titles) ? msg.titles : [])
     .map(x => String(x || '').trim().toLowerCase()).filter(Boolean));
-  if (!want.size) return { ok: true, closed: 0, groups: [] };
+  // id での指定は「タブ片付け」ボタン（手動）だけ受ける。名前の無いグループはこれでしか指定できない
+  const ids = new Set(msg.auto === false && Array.isArray(msg.ids) ? msg.ids.filter(Number.isInteger) : []);
+  if (!want.size && !ids.size) return { ok: true, closed: 0, groups: [], closedIds: [] };
   const all = await chrome.tabGroups.query({});
   const own = ownGroupId(sender);
   const ctx = await closeContext(msg, true, all);
   let closed = 0;
   const groups = [];
+  const closedIds = [];
   for (const g of all) {
     const name = String(g.title || '').trim().toLowerCase();
-    if (!want.has(name) || g.id === own) continue;
+    if (!(want.has(name) || ids.has(g.id)) || g.id === own) continue;
     if (!mayClose(ctx.recs[g.id], ctx)) continue;
     const n = await removeGroup(g.id);
-    if (n) { closed += n; groups.push(g.title || ''); }
+    if (n) { closed += n; groups.push(g.title || ''); closedIds.push(g.id); }
   }
-  return { ok: true, closed: closed, groups: groups };
+  return { ok: true, closed: closed, groups: groups, closedIds: closedIds };
 }
 
 /* ------------------------------------------------- 中身が書かれた後の差し込み

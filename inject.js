@@ -28,8 +28,9 @@
   const MARK = 'data-gtasks-ext';
   // 名乗りに付ける版と「出来ること」。レポートはこれが無ければ古い版とみなす（1.7.0〜）
   //   acct: アカウントの印で見分ける / recent: 開いて2分は自動で閉じない / list: グループの一覧を返す
+  //   ids: 「タブ片付け」で名前の無いグループも id で閉じられる（1.7.1〜）
   const VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return ''; } })();
-  const CAPS = ['acct', 'recent', 'list'];
+  const CAPS = ['acct', 'recent', 'list', 'ids'];
   const ACCT_MAX = 64;
   const acctOf = d => String((d && d.acct) || '').slice(0, ACCT_MAX);
 
@@ -147,15 +148,16 @@
     if (d.type === 'close-groups') {
       const titles = (Array.isArray(d.titles) ? d.titles : [])
         .map(x => String(x || '').slice(0, NAME_MAX)).slice(0, 200);
+      const ids = (Array.isArray(d.ids) ? d.ids : []).filter(Number.isInteger).slice(0, 300);
       chrome.runtime.sendMessage({
-        type: 'close-groups', titles: titles,
+        type: 'close-groups', titles: titles, ids: ids,
         acct: acctOf(d), auto: d.auto !== false, others: d.others === true
       }, res => {
         const err = chrome.runtime.lastError;
         window.postMessage({
           source: SOURCE, type: 'close-groups-done', id: d.id,
           ok: !err && res && res.ok, closed: (res && res.closed) || 0,
-          groups: (res && res.groups) || [],
+          groups: (res && res.groups) || [], closedIds: (res && res.closedIds) || [],
           error: err ? err.message : (res && res.error) || ''
         }, '*');
       });

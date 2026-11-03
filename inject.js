@@ -20,7 +20,18 @@
 (() => {
   const SOURCE = 'gtasks-priority';
   const MAX_TABS = 12;        // 押し間違いで大量に開かないための上限
+  // 閉じる・片付けで受け取るグループ名の長さの上限。20 にしていた頃は、それより長い名前の
+  // グループ（自分で付けた名前など）が一致せず、「タブ片付け」で閉じられなかった
+  const NAME_MAX = 100;
+  // 開くときのグループ名の長さ。レポート側の GROUP_NAME_MAX と対（レポートは必ずこの長さ以内で送る）
+  const GROUP_TITLE_MAX = 20;
   const MARK = 'data-gtasks-ext';
+  // 名乗りに付ける版と「出来ること」。レポートはこれが無ければ古い版とみなす（1.7.0〜）
+  //   acct: アカウントの印で見分ける / recent: 開いて2分は自動で閉じない / list: グループの一覧を返す
+  const VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return ''; } })();
+  const CAPS = ['acct', 'recent', 'list'];
+  const ACCT_MAX = 64;
+  const acctOf = d => String((d && d.acct) || '').slice(0, ACCT_MAX);
 
   // レポートの枠以外（画像などの googleusercontent）では何もしない
   if (location.pathname.indexOf('/userCodeAppPanel') !== 0) return;
@@ -43,7 +54,7 @@
       }
     } catch (e) { /* 書き換えの途中なら次の回で付く */ }
     try {
-      window.postMessage({ source: SOURCE, type: 'ext-ready' }, '*');
+      window.postMessage({ source: SOURCE, type: 'ext-ready', ver: VERSION, caps: CAPS }, '*');
     } catch (e) { /* 無視 */ }
   }
 
@@ -96,7 +107,7 @@
     if (!d || d.source !== SOURCE) return;
     if (d.type === 'ext-ping') { announce(); return; }
     if (d.type !== 'close-group' && d.type !== 'open-group' && d.type !== 'close-groups' &&
-        d.type !== 'sync-groups') return;
+        d.type !== 'sync-groups' && d.type !== 'list-groups') return;
 
     const done = d.type + '-done';
 
@@ -104,9 +115,24 @@
     // ここで止めないと sendMessage で例外になり、画面には何も返らない
     if (!alive()) { replyDead(done, d.id); return; }
 
+    if (d.type === 'list-groups') {
+      chrome.runtime.sendMessage({ type: 'list-groups', acct: acctOf(d) }, res => {
+        const err = chrome.runtime.lastError;
+        window.postMessage({
+          source: SOURCE, type: 'list-groups-done', id: d.id,
+          ok: !err && res && res.ok, groups: (res && res.groups) || [],
+          error: err ? err.message : (res && res.error) || ''
+        }, '*');
+      });
+      return;
+    }
+
     if (d.type === 'sync-groups') {
-      const list = v => (Array.isArray(v) ? v : []).map(x => String(x || '').slice(0, 20)).slice(0, 500);
-      chrome.runtime.sendMessage({ type: 'sync-groups', keep: list(d.keep), known: list(d.known) }, res => {
+      const list = v => (Array.isArray(v) ? v : []).map(x => String(x || '').slice(0, NAME_MAX)).slice(0, 500);
+      chrome.runtime.sendMessage({
+        type: 'sync-groups', keep: list(d.keep), known: list(d.known),
+        acct: acctOf(d), auto: d.auto !== false
+      }, res => {
         const err = chrome.runtime.lastError;
         window.postMessage({
           source: SOURCE, type: 'close-groups-done', id: d.id,
@@ -120,8 +146,11 @@
 
     if (d.type === 'close-groups') {
       const titles = (Array.isArray(d.titles) ? d.titles : [])
-        .map(x => String(x || '').slice(0, 20)).slice(0, 200);
-      chrome.runtime.sendMessage({ type: 'close-groups', titles: titles }, res => {
+        .map(x => String(x || '').slice(0, NAME_MAX)).slice(0, 200);
+      chrome.runtime.sendMessage({
+        type: 'close-groups', titles: titles,
+        acct: acctOf(d), auto: d.auto !== false, others: d.others === true
+      }, res => {
         const err = chrome.runtime.lastError;
         window.postMessage({
           source: SOURCE, type: 'close-groups-done', id: d.id,
@@ -135,7 +164,7 @@
 
     if (d.type === 'close-group') {
       chrome.runtime.sendMessage({
-        type: 'close-group', title: String(d.title || '').slice(0, 20)
+        type: 'close-group', title: String(d.title || '').slice(0, NAME_MAX), acct: acctOf(d)
       }, res => {
         const err = chrome.runtime.lastError;
         window.postMessage({
@@ -153,9 +182,11 @@
 
     chrome.runtime.sendMessage({
       type: 'open-group',
-      title: String(d.title || '').slice(0, 20),
+      title: String(d.title || '').slice(0, GROUP_TITLE_MAX),
       color: String(d.color || 'blue'),
-      urls: urls
+      urls: urls,
+      acct: acctOf(d),
+      taskId: String(d.taskId || '').slice(0, 200)
     }, res => {
       const err = chrome.runtime.lastError;
       window.postMessage({

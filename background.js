@@ -9,6 +9,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
            : msg.type === 'close-groups' ? closeGroups
            : msg.type === 'sync-groups' ? syncGroups
            : msg.type === 'list-groups' ? listGroups
+           : msg.type === 'focus-group' ? focusGroup
            : null;
   if (!fn) return;
   const job = serial(() => fn(msg, sender));
@@ -258,6 +259,41 @@ async function listGroups(msg, sender) {
     });
   }
   return { ok: true, groups: groups };
+}
+
+/**
+ * 既にあるグループを前面に出す（1.7.2〜）。ランダムで選んだタスクが既に対応中だったときに使う。
+ * そのタスクの記録が付いたグループを先に探し、無ければ名前で探す。
+ * 別のアカウントの画面が開いたグループと、レポート自身が入っているグループは選ばない。
+ * 折りたたまれていれば開き、先頭のタブを前面に出す。見つからなければ found: false を返す
+ * （レポートはそのとき開き直す）
+ */
+async function focusGroup(msg, sender) {
+  const title = norm(msg.title);
+  const taskId = String(msg.taskId || '');
+  const acct = String(msg.acct || '');
+  await touchAcct(acct);
+  const all = await chrome.tabGroups.query({});
+  const recs = await loadRecs(all);
+  const seen = await loadObj(SEEN_KEY);
+  const now = Date.now();
+  const own = ownGroupId(sender);
+  const ok = g => {
+    if (g.id === own) return false;
+    const ra = recAcct(recs[g.id], seen, now);
+    return !ra || ra === acct;
+  };
+  const cand = all.filter(ok);
+  const g = (taskId && cand.find(x => recs[x.id] && recs[x.id].t === taskId && norm(x.title) === title))
+         || (title && cand.find(x => norm(x.title) === title));
+  if (!g) return { ok: true, found: false };
+
+  const tabs = (await chrome.tabs.query({ groupId: g.id })).sort((a, b) => a.index - b.index);
+  if (!tabs.length) return { ok: true, found: false };
+  if (g.collapsed) await chrome.tabGroups.update(g.id, { collapsed: false });
+  await chrome.tabs.update(tabs[0].id, { active: true });
+  await chrome.windows.update(tabs[0].windowId, { focused: true });
+  return { ok: true, found: true, tabs: tabs.length };
 }
 
 /* ------------------------------------------------- 放置グループの片付け

@@ -31,34 +31,61 @@ async function openGroup(msg, sender) {
   const title = msg.title || 'タスク';
   const acct = String(msg.acct || '');
 
-  // まず全部を裏で開く。1枚ずつ前面に出すと、開いている間ちらつくため
-  const tabIds = [];
-  for (const url of msg.urls) {
-    const t = await chrome.tabs.create(
-      windowId ? { url, active: false, windowId } : { url, active: false });
-    tabIds.push(t.id);
-  }
-
   // 同じ名前のグループが既にあれば、そこに足す（押すたびに増えないように）。
   // ただし別のアカウントの画面が開いたグループには足さない（片方の完了で、もう片方のタブまで閉じないように）
   const recs = await loadRecs();
   const seen = await loadObj(SEEN_KEY);
   const now = Date.now();
-  let groupId;
   const found = await chrome.tabGroups.query(
     windowId ? { windowId, title } : { title });
   const join = (found || []).find(g => {
     const ra = recAcct(recs[g.id], seen, now);
     return !ra || ra === acct;
   });
-  if (join) {
-    groupId = await chrome.tabs.group({ groupId: join.id, tabIds });
-  } else {
-    groupId = await chrome.tabs.group(
-      windowId ? { tabIds, createProperties: { windowId } } : { tabIds });
+
+  // 同じページが既に開いていれば、開き直さずにそのタブを使う（1.7.3〜）。
+  //   どのグループにも入っていない同じ窓のタブ → このグループに入れる
+  //   このグループに入っているタブ → そのまま
+  //   ほかのグループ・ほかの窓のタブ → 動かさない（前面に出すだけ）
+  const openTabs = await chrome.tabs.query({});
+  const selfId = sender.tab ? sender.tab.id : -1;
+  const used = new Set();
+  const order = [];     // 開く順のタブ id（最初の1枚を前面に出す）
+  const tabIds = [];    // このグループに入れるタブ
+  let opened = 0, reused = 0;
+  for (const url of msg.urls) {
+    const key = urlKey(url);
+    const hit = openTabs.find(t => t.id !== selfId && !used.has(t.id) && urlKey(t.url || t.pendingUrl) === key);
+    if (hit) {
+      used.add(hit.id);
+      order.push(hit.id);
+      reused++;
+      const free = hit.groupId === -1 || hit.groupId === undefined;
+      const sameWin = !windowId || hit.windowId === windowId;
+      if (free && sameWin) tabIds.push(hit.id);
+      continue;
+    }
+    // 裏で開く。1枚ずつ前面に出すと、開いている間ちらつくため
+    const t = await chrome.tabs.create(
+      windowId ? { url, active: false, windowId } : { url, active: false });
+    order.push(t.id);
+    tabIds.push(t.id);
+    opened++;
   }
 
-  await chrome.tabGroups.update(groupId, { title, color: msg.color || 'blue' });
+  let groupId = join ? join.id : null;
+  if (tabIds.length) {
+    groupId = join
+      ? await chrome.tabs.group({ groupId: join.id, tabIds })
+      : await chrome.tabs.group(windowId ? { tabIds, createProperties: { windowId } } : { tabIds });
+  }
+  if (groupId === null) {
+    // 全部が既に開いていて、どれもほかのグループに入っていた。前面に出すだけ
+    await bringToFront(order[0]);
+    return { ok: true, opened: 0, reused: reused };
+  }
+
+  await chrome.tabGroups.update(groupId, { title, color: msg.color || 'blue', collapsed: false });
   await rememberTitle(title);   // この拡張が作ったグループとして覚える（放置の片付けに使う）
   // どのアカウントの・どのタスクの・いつ開いたグループかも覚える（1.7.0〜）
   const prev = recs[groupId];
@@ -68,17 +95,36 @@ async function openGroup(msg, sender) {
   await saveObj(REC_KEY, recs);
   if (acct) { seen[acct] = now; await saveObj(SEEN_KEY, seen); }
 
-  // まとめ終わってから、最初に開いたタブを前面に出す。
+  // まとめ終わってから、最初のタブを前面に出す。
   // グループ化でタブが動くことがあるので、並べ替えが済んだ後に切り替える
+  await bringToFront(order[0]);
+  return { ok: true, opened: opened, reused: reused };
+}
+
+/** タブとその窓を前面に出す。閉じられていた等で失敗しても、開くこと自体は済んでいるので失敗扱いにしない */
+async function bringToFront(tabId) {
+  if (typeof tabId !== 'number') return;
   try {
-    await chrome.tabs.update(tabIds[0], { active: true });
-    if (windowId) await chrome.windows.update(windowId, { focused: true });
+    const t = await chrome.tabs.update(tabId, { active: true });
+    if (t && t.windowId !== undefined) await chrome.windows.update(t.windowId, { focused: true });
   } catch (e) {
-    // 閉じられていた等。開くこと自体は済んでいるので、ここで失敗扱いにはしない
     console.debug('[タブまとめ] 前面に出せませんでした:', e && e.message);
   }
+}
 
-  return { ok: true, opened: tabIds.length };
+/**
+ * 同じページかを比べるための形。末尾の「/」の有無だけは同じとみなす。
+ * # 以降は残す（Gmail は # 以降でどのメールかが変わる）
+ */
+function urlKey(u) {
+  if (!u) return '';
+  try {
+    const x = new URL(u);
+    // 大文字小文字は区別する（パスや id は区別されるため）。ホスト名は URL が小文字にそろえる
+    return x.origin + x.pathname.replace(/\/+$/, '') + x.search + x.hash;
+  } catch (e) {
+    return String(u);
+  }
 }
 
 /**

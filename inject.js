@@ -209,7 +209,7 @@
       const err = chrome.runtime.lastError;
       window.postMessage({
         source: SOURCE, type: 'open-group-done', id: d.id,
-        ok: !err && res && res.ok, opened: res && res.opened,
+        ok: !err && res && res.ok, opened: res && res.opened, reused: (res && res.reused) || 0,
         error: err ? err.message : (res && res.error) || ''
       }, '*');
     });

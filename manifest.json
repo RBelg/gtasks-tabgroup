@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Google Tasks 優先度レポート タブまとめ",
-  "version": "1.7.2",
+  "version": "1.7.3",
   "description": "優先度レポートのタスクに紐づくページをまとめて開き、タスク名のタブグループにします。",
   "permissions": [
     "tabs",

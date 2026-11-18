@@ -20,7 +20,7 @@ function setup(openTabs, groups) {
       update: async () => {}
     },
     tabs: {
-      onUpdated: { addListener() {} },
+      onUpdated: { addListener() {} }, onActivated: { addListener() {} },
       query: (q, cb) => { if (cb) return cb([]); return Promise.resolve(openTabs.slice()); },
       create: async p => { const t = { id: nextId++, url: p.url, windowId: p.windowId }; log.created.push(p.url); return t; },
       group: async p => { log.grouped.push({ into: p.groupId || 'new', ids: p.tabIds.slice() }); return p.groupId || 77; },

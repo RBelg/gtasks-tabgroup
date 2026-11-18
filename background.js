@@ -425,6 +425,35 @@ async function closeGroups(msg, sender) {
   return { ok: true, closed: closed, groups: groups, closedIds: closedIds };
 }
 
+/* ------------------------------------------------- 選択を外れたグループを折りたたむ（1.7.4〜）
+   グループの外のタブ（または別のグループ）に切り替えたら、それまで開いていたグループを折りたたむ。
+   閉じる（タブを消す）のではなく、たたむだけ。押せばまた開く。
+   対象はこの拡張が作ったグループだけ（記録があるもの・作った名前として覚えているもの）。
+   自分で作ったグループには触らない */
+chrome.tabs.onActivated.addListener(info => { collapseOthers(info.windowId); });
+
+async function collapseOthers(windowId, retry) {
+  try {
+    // 切り替わった時点のタブではなく、いま前面のタブで決める（やり直しの間に切り替わることがあるため）
+    const [tab] = await chrome.tabs.query({ active: true, windowId: windowId });
+    if (!tab) return;
+    const active = tab.groupId;
+    const groups = await chrome.tabGroups.query({ windowId: windowId, collapsed: false });
+    if (!groups.length) return;
+    const recs = await loadObj(REC_KEY);
+    const made = await loadMade();
+    for (const g of groups) {
+      if (g.id === active) continue;
+      if (!recs[g.id] && !made.has(norm(g.title))) continue;
+      await chrome.tabGroups.update(g.id, { collapsed: true });
+    }
+  } catch (e) {
+    // タブを引きずっている最中などは触れない。少し待って1回だけやり直す
+    if (!retry) setTimeout(() => collapseOthers(windowId, true), 400);
+    else console.debug('[タブまとめ] 折りたためませんでした:', e && e.message);
+  }
+}
+
 /* ------------------------------------------------- 中身が書かれた後の差し込み
    レポートの中身は、親ページが後から document.write でレポートの枠に流し込む。
    その書き込みで文書が作り直されるため、最初に差し込んだぶんは道連れに消えてしまう

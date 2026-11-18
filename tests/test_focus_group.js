@@ -20,7 +20,7 @@ function setup(groups, tabs, recs, seen) {
       update: async (id, p) => { if (p.collapsed === false) log.expanded.push(id); }
     },
     tabs: {
-      onUpdated: { addListener() {} },
+      onUpdated: { addListener() {} }, onActivated: { addListener() {} },
       query: (q, cb) => {
         if (cb) return cb([]);
         return Promise.resolve((tabs[q.groupId] || []).map(t => Object.assign({}, t)));

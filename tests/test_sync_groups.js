@@ -17,7 +17,7 @@ function setup(groups, tabs, made) {
     } },
     tabGroups: { query: async () => live.slice(), update: async () => {} },
     tabs: {
-      onUpdated: { addListener() {} },
+      onUpdated: { addListener() {} }, onActivated: { addListener() {} },
       query: (q, cb) => {
         if (cb) return cb([]);   // 起動時の差し込み直し用（ここでは使わない）
         return Promise.resolve((tabs[q.groupId] || []).map(id => ({ id })));

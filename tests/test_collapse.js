@@ -5,7 +5,7 @@ const assert = require('assert');
 
 const src = fs.readFileSync(path.join(__dirname, '..', 'background.js'), 'utf8');
 
-function setup(activeTab, groups, recs, made) {
+function setup(activeTab, groups, recs, made, onQuery) {
   const store = { groupRecs: recs || {}, madeTitles: made || [] };
   const collapsed = [];
   const chrome = {
@@ -17,10 +17,10 @@ function setup(activeTab, groups, recs, made) {
     },
     tabs: {
       onUpdated: { addListener() {} }, onActivated: { addListener() {} },
-      query: (q, cb) => { if (cb) return cb([]); return Promise.resolve(q.active ? [activeTab] : []); }
+      query: (q, cb) => { if (cb) return cb([]); if (onQuery) onQuery(activeTab); return Promise.resolve(q.active ? [Object.assign({}, activeTab)] : []); }
     }
   };
-  const api = new Function('chrome', src + '\nreturn { collapseOthers };')(chrome);
+  const api = new Function('chrome', src + '\nreturn { collapseOthers, holdGroup };')(chrome);
   return { api, collapsed };
 }
 
@@ -44,6 +44,22 @@ function setup(activeTab, groups, recs, made) {
     await t.api.collapseOthers(1);
     assert.deepStrictEqual(t.collapsed.sort(), [1, 2]);
     console.log('[OK] グループの外のタブに切り替えたら、開いていたグループをたたむ');
+  }
+  {
+    // 判断している間に、たたもうとしたグループへ切り替わったら、そのグループはたたまない
+    let n = 0;
+    const t = setup({ id: 9, groupId: -1 }, groups, { 1: { n: '見積書を' } }, ['日報'], tab => { if (++n === 2) tab.groupId = 1; });
+    await t.api.collapseOthers(1);
+    assert.deepStrictEqual(t.collapsed, [4]);
+    console.log('[OK] たたむ直前に前面のタブを確かめ直す（選択中のグループはたたまない）');
+  }
+  {
+    // いま開いた・前面に出したグループは、数秒たたまない
+    const t = setup({ id: 9, groupId: -1 }, groups, { 1: { n: '見積書を' } }, ['日報']);
+    t.api.holdGroup(1);
+    await t.api.collapseOthers(1);
+    assert.deepStrictEqual(t.collapsed, [4]);
+    console.log('[OK] 開いた直後のグループはたたまない');
   }
   console.log('すべて通過');
 })().catch(e => { console.error(e); process.exit(1); });

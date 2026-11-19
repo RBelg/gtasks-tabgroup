@@ -81,10 +81,13 @@ async function openGroup(msg, sender) {
   }
   if (groupId === null) {
     // 全部が既に開いていて、どれもほかのグループに入っていた。前面に出すだけ
+    const first = openTabs.find(t => t.id === order[0]);
+    if (first) holdGroup(first.groupId);
     await bringToFront(order[0]);
     return { ok: true, opened: 0, reused: reused };
   }
 
+  holdGroup(groupId);   // 開いた直後に、切り替えの途中の判断でたたまれないように
   await chrome.tabGroups.update(groupId, { title, color: msg.color || 'blue', collapsed: false });
   await rememberTitle(title);   // この拡張が作ったグループとして覚える（放置の片付けに使う）
   // どのアカウントの・どのタスクの・いつ開いたグループかも覚える（1.7.0〜）
@@ -336,6 +339,7 @@ async function focusGroup(msg, sender) {
 
   const tabs = (await chrome.tabs.query({ groupId: g.id })).sort((a, b) => a.index - b.index);
   if (!tabs.length) return { ok: true, found: false };
+  holdGroup(g.id);
   if (g.collapsed) await chrome.tabGroups.update(g.id, { collapsed: false });
   await chrome.tabs.update(tabs[0].id, { active: true });
   await chrome.windows.update(tabs[0].windowId, { focused: true });
@@ -430,21 +434,45 @@ async function closeGroups(msg, sender) {
    閉じる（タブを消す）のではなく、たたむだけ。押せばまた開く。
    対象はこの拡張が作ったグループだけ（記録があるもの・作った名前として覚えているもの）。
    自分で作ったグループには触らない */
-chrome.tabs.onActivated.addListener(info => { collapseOthers(info.windowId); });
+/* 1.7.5: 選択中のグループがたたまれてしまうことがあった。Chrome は前面のタブが入っているグループを
+   たたむと、前面を外のタブへ移してしまうので、「すぐ閉じる」ように見える。次の3つで防ぐ。
+   - 切り替えが落ち着いてから（最後の切り替えの 300ms 後に）1回だけ判断する。タブを開く・前面に出すなど、
+     切り替えが続けて起きる間に古い判断でたたまない
+   - たたむ直前に、いま前面のタブがそのグループに居ないかを毎回確かめ直す
+   - この拡張がいま開いた・前面に出したグループは、数秒たたまない */
+const COLLAPSE_WAIT_MS = 300;
+const HOLD_MS = 3000;
+const collapseTimers = {};
+const holdUntil = {};            // グループ id → この時刻まではたたまない
+function holdGroup(groupId) { if (typeof groupId === 'number') holdUntil[groupId] = Date.now() + HOLD_MS; }
+
+chrome.tabs.onActivated.addListener(info => {
+  const w = info.windowId;
+  clearTimeout(collapseTimers[w]);
+  collapseTimers[w] = setTimeout(() => { delete collapseTimers[w]; collapseOthers(w); }, COLLAPSE_WAIT_MS);
+});
+
+/** いま前面のタブが入っているグループの id（グループの外なら -1） */
+async function activeGroupId(windowId) {
+  const [tab] = await chrome.tabs.query({ active: true, windowId: windowId });
+  return tab ? tab.groupId : null;
+}
 
 async function collapseOthers(windowId, retry) {
   try {
     // 切り替わった時点のタブではなく、いま前面のタブで決める（やり直しの間に切り替わることがあるため）
-    const [tab] = await chrome.tabs.query({ active: true, windowId: windowId });
-    if (!tab) return;
-    const active = tab.groupId;
+    const first = await activeGroupId(windowId);
+    if (first === null) return;
     const groups = await chrome.tabGroups.query({ windowId: windowId, collapsed: false });
     if (!groups.length) return;
     const recs = await loadObj(REC_KEY);
     const made = await loadMade();
+    const now = Date.now();
     for (const g of groups) {
-      if (g.id === active) continue;
+      if (g.id === first) continue;
+      if ((holdUntil[g.id] || 0) > now) continue;
       if (!recs[g.id] && !made.has(norm(g.title))) continue;
+      if (await activeGroupId(windowId) === g.id) continue;   // 判断の間に、このグループへ切り替わった
       await chrome.tabGroups.update(g.id, { collapsed: true });
     }
   } catch (e) {

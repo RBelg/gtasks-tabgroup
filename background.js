@@ -10,6 +10,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
            : msg.type === 'sync-groups' ? syncGroups
            : msg.type === 'list-groups' ? listGroups
            : msg.type === 'focus-group' ? focusGroup
+           : msg.type === 'expand-groups' ? expandGroups
            : null;
   if (!fn) return;
   const job = serial(() => fn(msg, sender));
@@ -81,13 +82,10 @@ async function openGroup(msg, sender) {
   }
   if (groupId === null) {
     // 全部が既に開いていて、どれもほかのグループに入っていた。前面に出すだけ
-    const first = openTabs.find(t => t.id === order[0]);
-    if (first) holdGroup(first.groupId);
     await bringToFront(order[0]);
     return { ok: true, opened: 0, reused: reused };
   }
 
-  holdGroup(groupId);   // 開いた直後に、切り替えの途中の判断でたたまれないように
   await chrome.tabGroups.update(groupId, { title, color: msg.color || 'blue', collapsed: false });
   await rememberTitle(title);   // この拡張が作ったグループとして覚える（放置の片付けに使う）
   // どのアカウントの・どのタスクの・いつ開いたグループかも覚える（1.7.0〜）
@@ -339,7 +337,6 @@ async function focusGroup(msg, sender) {
 
   const tabs = (await chrome.tabs.query({ groupId: g.id })).sort((a, b) => a.index - b.index);
   if (!tabs.length) return { ok: true, found: false };
-  holdGroup(g.id);
   if (g.collapsed) await chrome.tabGroups.update(g.id, { collapsed: false });
   await chrome.tabs.update(tabs[0].id, { active: true });
   await chrome.windows.update(tabs[0].windowId, { focused: true });
@@ -429,57 +426,45 @@ async function closeGroups(msg, sender) {
   return { ok: true, closed: closed, groups: groups, closedIds: closedIds };
 }
 
-/* ------------------------------------------------- 選択を外れたグループを折りたたむ（1.7.4〜）
-   グループの外のタブ（または別のグループ）に切り替えたら、それまで開いていたグループを折りたたむ。
-   閉じる（タブを消す）のではなく、たたむだけ。押せばまた開く。
-   対象はこの拡張が作ったグループだけ（記録があるもの・作った名前として覚えているもの）。
-   自分で作ったグループには触らない */
-/* 1.7.5: 選択中のグループがたたまれてしまうことがあった。Chrome は前面のタブが入っているグループを
-   たたむと、前面を外のタブへ移してしまうので、「すぐ閉じる」ように見える。次の3つで防ぐ。
-   - 切り替えが落ち着いてから（最後の切り替えの 300ms 後に）1回だけ判断する。タブを開く・前面に出すなど、
-     切り替えが続けて起きる間に古い判断でたたまない
-   - たたむ直前に、いま前面のタブがそのグループに居ないかを毎回確かめ直す
-   - この拡張がいま開いた・前面に出したグループは、数秒たたまない */
-const COLLAPSE_WAIT_MS = 300;
-const HOLD_MS = 3000;
-const collapseTimers = {};
-const holdUntil = {};            // グループ id → この時刻まではたたまない
-function holdGroup(groupId) { if (typeof groupId === 'number') holdUntil[groupId] = Date.now() + HOLD_MS; }
-
-chrome.tabs.onActivated.addListener(info => {
-  const w = info.windowId;
-  clearTimeout(collapseTimers[w]);
-  collapseTimers[w] = setTimeout(() => { delete collapseTimers[w]; collapseOthers(w); }, COLLAPSE_WAIT_MS);
-});
-
-/** いま前面のタブが入っているグループの id（グループの外なら -1） */
-async function activeGroupId(windowId) {
-  const [tab] = await chrome.tabs.query({ active: true, windowId: windowId });
-  return tab ? tab.groupId : null;
-}
-
-async function collapseOthers(windowId, retry) {
-  try {
-    // 切り替わった時点のタブではなく、いま前面のタブで決める（やり直しの間に切り替わることがあるため）
-    const first = await activeGroupId(windowId);
-    if (first === null) return;
-    const groups = await chrome.tabGroups.query({ windowId: windowId, collapsed: false });
-    if (!groups.length) return;
-    const recs = await loadObj(REC_KEY);
-    const made = await loadMade();
-    const now = Date.now();
-    for (const g of groups) {
-      if (g.id === first) continue;
-      if ((holdUntil[g.id] || 0) > now) continue;
-      if (!recs[g.id] && !made.has(norm(g.title))) continue;
-      if (await activeGroupId(windowId) === g.id) continue;   // 判断の間に、このグループへ切り替わった
-      await chrome.tabGroups.update(g.id, { collapsed: true });
+/* ------------------------------------------------- 選択中のタスクのグループだけ開いておく（1.8.0〜）
+   レポートで「選択中」のタスクのグループを開き、ほかのタスクのグループはたたむ。
+   選択を外したら、そのグループもたたむ。閉じる（タブを消す）のではなく、たたむだけ。
+   以前（1.7.4〜1.7.5）はタブを切り替えるたびにたたんでいたが、それだとレポートのタブに戻った
+   だけで選択中のグループまでたたまれてしまうので、レポートの選択に合わせる形に改めた。
+   扱うのはレポートが送ってきた名前のグループだけ。別のアカウントの画面が開いたものと、
+   レポート自身が入っているグループには触らない */
+async function expandGroups(msg, sender) {
+  const expand = norm(msg.expand);
+  const taskId = String(msg.taskId || '');
+  const collapse = new Set((Array.isArray(msg.collapse) ? msg.collapse : []).map(norm).filter(Boolean));
+  const acct = String(msg.acct || '');
+  const all = await chrome.tabGroups.query({});
+  const recs = await loadRecs(all);
+  const seen = await loadObj(SEEN_KEY);
+  const now = Date.now();
+  const own = ownGroupId(sender);
+  const mine = g => { const ra = recAcct(recs[g.id], seen, now); return !ra || ra === acct; };
+  const cand = all.filter(g => g.id !== own && mine(g));
+  // 開くのは1つだけ。同じ名前が2つあれば、そのタスクで開いた記録のある方
+  const target = expand
+    ? (cand.find(g => norm(g.title) === expand && recs[g.id] && recs[g.id].t === taskId)
+       || cand.find(g => norm(g.title) === expand))
+    : null;
+  let expanded = 0, collapsed = 0;
+  for (const g of cand) {
+    try {
+      if (target && g.id === target.id) {
+        if (g.collapsed) { await chrome.tabGroups.update(g.id, { collapsed: false }); expanded++; }
+      } else if (!g.collapsed && (collapse.has(norm(g.title)) || norm(g.title) === expand)) {
+        await chrome.tabGroups.update(g.id, { collapsed: true });
+        collapsed++;
+      }
+    } catch (e) {
+      // タブを引きずっている最中などは触れない。次に選択が変わったときにそろう
+      console.debug('[タブまとめ] 開閉できませんでした:', e && e.message);
     }
-  } catch (e) {
-    // タブを引きずっている最中などは触れない。少し待って1回だけやり直す
-    if (!retry) setTimeout(() => collapseOthers(windowId, true), 400);
-    else console.debug('[タブまとめ] 折りたためませんでした:', e && e.message);
   }
+  return { ok: true, expanded: expanded, collapsed: collapsed, found: !!target };
 }
 
 /* ------------------------------------------------- 中身が書かれた後の差し込み

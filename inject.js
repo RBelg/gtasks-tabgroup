@@ -30,8 +30,9 @@
   //   acct: アカウントの印で見分ける / recent: 開いて2分は自動で閉じない / list: グループの一覧を返す
   //   ids: 「タブ片付け」で名前の無いグループも id で閉じられる（1.7.1〜）
   //   focus: 既にあるグループを前面に出せる（1.7.2〜）
+  //   expand: 選択中のタスクのグループだけ開き、ほかはたたむ（1.8.0〜）
   const VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch (e) { return ''; } })();
-  const CAPS = ['acct', 'recent', 'list', 'ids', 'focus'];
+  const CAPS = ['acct', 'recent', 'list', 'ids', 'focus', 'expand'];
   const ACCT_MAX = 64;
   const acctOf = d => String((d && d.acct) || '').slice(0, ACCT_MAX);
 
@@ -109,7 +110,7 @@
     if (!d || d.source !== SOURCE) return;
     if (d.type === 'ext-ping') { announce(); return; }
     if (d.type !== 'close-group' && d.type !== 'open-group' && d.type !== 'close-groups' &&
-        d.type !== 'sync-groups' && d.type !== 'list-groups' && d.type !== 'focus-group') return;
+        d.type !== 'sync-groups' && d.type !== 'list-groups' && d.type !== 'focus-group' && d.type !== 'expand-groups') return;
 
     const done = d.type + '-done';
 
@@ -123,6 +124,22 @@
         window.postMessage({
           source: SOURCE, type: 'list-groups-done', id: d.id,
           ok: !err && res && res.ok, groups: (res && res.groups) || [],
+          error: err ? err.message : (res && res.error) || ''
+        }, '*');
+      });
+      return;
+    }
+
+    if (d.type === 'expand-groups') {
+      const list = v => (Array.isArray(v) ? v : []).map(x => String(x || '').slice(0, NAME_MAX)).slice(0, 500);
+      chrome.runtime.sendMessage({
+        type: 'expand-groups', expand: String(d.expand || '').slice(0, NAME_MAX),
+        taskId: String(d.taskId || '').slice(0, 200), collapse: list(d.collapse), acct: acctOf(d)
+      }, res => {
+        const err = chrome.runtime.lastError;
+        window.postMessage({
+          source: SOURCE, type: 'expand-groups-done', id: d.id,
+          ok: !err && res && res.ok, found: !!(res && res.found),
           error: err ? err.message : (res && res.error) || ''
         }, '*');
       });
